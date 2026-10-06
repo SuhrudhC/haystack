@@ -1,0 +1,6 @@
+fixes:
+  - |
+    Tools with ``Annotated[State, ...]`` parameters, including optional wrappers,
+    now omit those parameters from their JSON schemas and receive the live agent
+    state during execution. Their calls also preserve state dependency ordering
+    in synchronous and asynchronous execution.

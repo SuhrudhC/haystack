@@ -7,12 +7,12 @@ import datetime
 import json
 import time
 from collections.abc import Callable
-from typing import Any
+from typing import Annotated, Any, Optional
 from unittest.mock import patch
 
 import pytest
 
-from haystack import Document
+from haystack import Document, component
 from haystack.components.agents.state import State
 from haystack.components.agents.tool_calling import (
     ToolNotFoundException,
@@ -38,8 +38,60 @@ from haystack.dataclasses import (
     ToolCall,
     ToolCallResult,
 )
-from haystack.tools import ComponentTool, Tool, Toolset
+from haystack.tools import ComponentTool, Tool, Toolset, create_tool_from_function
 from haystack.tools.errors import ToolInvocationError
+
+
+@pytest.mark.parametrize(
+    "state_type",
+    [
+        Annotated[State, "Agent state"],
+        Annotated[State | None, "Agent state"],
+        Annotated[State, "Agent state"] | None,
+        Annotated[Optional[State], "Agent state"],  # noqa: UP045 - exercise legacy typing annotations
+    ],
+)
+@pytest.mark.parametrize("component_tool", [False, True])
+@pytest.mark.parametrize("async_execution", [False, True])
+@pytest.mark.asyncio
+async def test_annotated_state_is_injected_and_calls_are_scheduled(
+    state_type: Any, component_tool: bool, async_execution: bool
+) -> None:
+    state = State(schema={"counter": {"type": int}}, data={"counter": 0})
+
+    def increment(agent_state: State | None = None) -> str:
+        assert agent_state is state
+        counter = state.get("counter") + 1
+        state.set("counter", counter)
+        return str(counter)
+
+    tool: Tool
+    if component_tool:
+
+        class Increment:
+            @component.output_types(result=str)
+            def run(self, agent_state: State | None = None) -> dict[str, str]:
+                return {"result": increment(agent_state)}
+
+        Increment.run.__annotations__["agent_state"] = state_type
+        tool = ComponentTool(component=component(Increment)(), outputs_to_string={"source": "result"})
+    else:
+        increment.__annotations__["agent_state"] = state_type
+        tool = create_tool_from_function(function=increment)
+
+    assert tool.parameters == {"type": "object", "properties": {}}
+    calls = [ToolCall(id=str(index), tool_name=tool.name, arguments={}) for index in range(2)]
+    assert _schedule_tool_calls(tool_calls=calls, tools=[tool, tool]) == [[0], [1]]
+    messages = [ChatMessage.from_assistant(tool_calls=calls)]
+    if async_execution:
+        results, updated_state = await _run_tool_async(messages=messages, state=state, tools=[tool])
+    else:
+        results, updated_state = _run_tool(messages=messages, state=state, tools=[tool])
+
+    assert updated_state is state
+    assert state.get("counter") == 2
+    assert [message.tool_call_result.result for message in results if message.tool_call_result] == ["1", "2"]
+    assert all(message.tool_call_result and not message.tool_call_result.error for message in results)
 
 
 def weather_function(location):
